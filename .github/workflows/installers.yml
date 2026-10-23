@@ -1,0 +1,72 @@
+name: Real Linux and macOS installer smoke tests
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Download and inspect production scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tah-scripts"
+          for app in codex claude-code; do
+            curl --fail --silent --show-error --location --max-time 90 "https://aiapi.tokenagenthub.com/install/$app.sh" -o "$RUNNER_TEMP/tah-scripts/$app.sh"
+            bash -n "$RUNNER_TEMP/tah-scripts/$app.sh"
+            if grep -Eq 'Tokenly\.cc|api\.qcode\.cc|asia\.qcode\.cc|us\.qcode\.cc' "$RUNNER_TEMP/tah-scripts/$app.sh"; then exit 1; fi
+          done
+          uname -a
+          node --version
+          npm --version
+      - name: Install both official CLIs and merge isolated user configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export HOME="$RUNNER_TEMP/tah-home"
+          export CODEX_HOME="$HOME/.codex"
+          export CLAUDE_CONFIG_DIR="$HOME/.claude"
+          mkdir -p "$CODEX_HOME" "$CLAUDE_CONFIG_DIR"
+          printf '%s\n' 'approval_policy = "on-request"' '[mcp_servers.keep]' 'command = "node"' > "$CODEX_HOME/config.toml"
+          printf '%s\n' '{"preserved":true}' > "$CODEX_HOME/auth.json"
+          printf '%s\n' '{"permissions":{"allow":["Read"]},"hooks":{"Stop":[]},"env":{"KEEP_ME":"yes"}}' > "$CLAUDE_CONFIG_DIR/settings.json"
+          printf '%s\n' 'export KEEP_SHELL_SETTING=yes' > "$HOME/.bashrc"
+          for app in codex claude-code; do
+            bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --no-verify
+          done
+          export PATH="$HOME/.config/tokenagenthub/node22/bin:$HOME/.config/tokenagenthub/npm/bin:$PATH"
+          codex --version
+          claude --version
+          for app in codex claude-code; do
+            bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --no-verify
+          done
+          node <<'JS'
+          const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+          const home=process.env.HOME;
+          const codex=fs.readFileSync(path.join(home,'.codex/config.toml'),'utf8');
+          assert(codex.includes('[mcp_servers.keep]'));
+          assert(codex.includes('approval_policy = "on-request"'));
+          assert(codex.includes('https://aiapi.tokenagenthub.com/openai/v1'));
+          assert.equal((codex.match(/# BEGIN TOKENAGENTHUB CODEX INSTALLER V1/g)||[]).length,1);
+          assert.equal(JSON.parse(fs.readFileSync(path.join(home,'.codex/auth.json'))).preserved,true);
+          const claude=JSON.parse(fs.readFileSync(path.join(home,'.claude/settings.json')));
+          assert.equal(claude.env.KEEP_ME,'yes');
+          assert.equal(claude.env.ANTHROPIC_BASE_URL,'https://aiapi.tokenagenthub.com/api');
+          assert.equal(claude.env.ANTHROPIC_AUTH_TOKEN,'cr_ISOLATED_TEST_NOT_A_REAL_KEY');
+          assert.deepEqual(claude.permissions.allow,['Read']);
+          assert.deepEqual(claude.hooks.Stop,[]);
+          const rc=fs.readFileSync(path.join(home,'.bashrc'),'utf8');
+          assert(rc.includes('KEEP_SHELL_SETTING=yes'));
+          assert.equal((rc.match(/# BEGIN TOKENAGENTHUB TERMINAL SETUP V1/g)||[]).length,1);
+          assert.equal(fs.readdirSync(path.join(home,'.config/tokenagenthub/backups')).length,4);
+          console.log('PASS: actual CLI installation/startup, configuration merge, backups and repeat setup');
+          JS
+          bash --noprofile --rcfile "$HOME/.bashrc" -ic 'test "$TOKENAGENTHUB_API_KEY" = cr_ISOLATED_TEST_NOT_A_REAL_KEY && test "$ANTHROPIC_BASE_URL" = https://aiapi.tokenagenthub.com/api && codex --version && claude --version'
