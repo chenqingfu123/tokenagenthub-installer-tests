@@ -1,0 +1,73 @@
+name: Installation article terminal checks
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Execute npm installation and shell environment examples
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/manual-install-home"
+          mkdir -p "$HOME"
+          node --version
+          npm --version
+          npm config set prefix "$HOME/.npm-global"
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+          export ANTHROPIC_BASE_URL="https://aiapi.tokenagenthub.com/api"
+          export ANTHROPIC_AUTH_TOKEN="cr_ISOLATED_TEST_NOT_A_REAL_KEY"
+          test "$ANTHROPIC_BASE_URL" = https://aiapi.tokenagenthub.com/api
+          test "$ANTHROPIC_AUTH_TOKEN" = cr_ISOLATED_TEST_NOT_A_REAL_KEY
+          for rc in .zshrc .bash_profile .bashrc; do
+            printf '%s\n' 'export ANTHROPIC_BASE_URL="https://aiapi.tokenagenthub.com/api"' 'export ANTHROPIC_AUTH_TOKEN="cr_ISOLATED_TEST_NOT_A_REAL_KEY"' 'export PATH="$HOME/.npm-global/bin:$PATH"' > "$HOME/$rc"
+            bash -c '. "$HOME/'"$rc"'"; test "$ANTHROPIC_BASE_URL" = https://aiapi.tokenagenthub.com/api; test "$ANTHROPIC_AUTH_TOKEN" = cr_ISOLATED_TEST_NOT_A_REAL_KEY; claude --version'
+          done
+          if [ "$(uname -s)" = Darwin ]; then
+            zsh -c '. "$HOME/.zshrc"; test "$ANTHROPIC_BASE_URL" = https://aiapi.tokenagenthub.com/api; claude --version'
+            brew info --cask claude-code
+          fi
+          export ANTHROPIC_MODEL=claude-sonnet-5
+          export MAX_THINKING_TOKENS=16000
+          export CLAUDE_CODE_EFFORT_LEVEL=high
+          export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+          test "$MAX_THINKING_TOKENS" = 16000
+          echo 'PASS: official CLI install/startup and manual Bash/Zsh configuration examples'
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Execute PowerShell install and temporary/permanent variable examples
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $taskPrefix = Join-Path $env:RUNNER_TEMP 'manual-cli'
+          npm.cmd install -g --prefix $taskPrefix @anthropic-ai/claude-code
+          if ($LASTEXITCODE -ne 0) { throw 'npm installation failed' }
+          $env:Path = "$taskPrefix;$env:Path"
+          claude.cmd --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLI startup failed' }
+          $env:ANTHROPIC_BASE_URL = 'https://aiapi.tokenagenthub.com/api'
+          $env:ANTHROPIC_AUTH_TOKEN = 'cr_ISOLATED_TEST_NOT_A_REAL_KEY'
+          $taskOldBase = [Environment]::GetEnvironmentVariable('ANTHROPIC_BASE_URL','User')
+          $taskOldKey = [Environment]::GetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','User')
+          try {
+            [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL','https://aiapi.tokenagenthub.com/api','User')
+            [Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','cr_ISOLATED_TEST_NOT_A_REAL_KEY','User')
+            if ([Environment]::GetEnvironmentVariable('ANTHROPIC_BASE_URL','User') -ne 'https://aiapi.tokenagenthub.com/api') { throw 'Persistent base mismatch' }
+            if ([Environment]::GetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN','User') -ne 'cr_ISOLATED_TEST_NOT_A_REAL_KEY') { throw 'Persistent key mismatch' }
+          } finally {
+            [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL',$taskOldBase,'User')
+            [Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN',$taskOldKey,'User')
+          }
+          'PASS: official Windows CLI and temporary/persistent environment examples'
