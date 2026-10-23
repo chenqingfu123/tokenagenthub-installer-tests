@@ -34,19 +34,32 @@ jobs:
           export HOME="$RUNNER_TEMP/tah-home"
           export CODEX_HOME="$HOME/.codex"
           export CLAUDE_CONFIG_DIR="$HOME/.claude"
+          mkdir -p "$RUNNER_TEMP/tah-no-node"
+          printf '#!/bin/sh\nexit 127\n' > "$RUNNER_TEMP/tah-no-node/node"
+          cp "$RUNNER_TEMP/tah-no-node/node" "$RUNNER_TEMP/tah-no-node/npm"
+          chmod +x "$RUNNER_TEMP/tah-no-node/node" "$RUNNER_TEMP/tah-no-node/npm"
+          export PATH="$RUNNER_TEMP/tah-no-node:$PATH"
           mkdir -p "$CODEX_HOME" "$CLAUDE_CONFIG_DIR"
           printf '%s\n' 'approval_policy = "on-request"' '[mcp_servers.keep]' 'command = "node"' > "$CODEX_HOME/config.toml"
           printf '%s\n' '{"preserved":true}' > "$CODEX_HOME/auth.json"
           printf '%s\n' '{"permissions":{"allow":["Read"]},"hooks":{"Stop":[]},"env":{"KEEP_ME":"yes"}}' > "$CLAUDE_CONFIG_DIR/settings.json"
           printf '%s\n' 'export KEEP_SHELL_SETTING=yes' > "$HOME/.bashrc"
           for app in codex claude-code; do
-            bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --no-verify
+            if [ "$app" = codex ]; then
+              bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --target cli --no-verify
+            else
+              bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --no-verify
+            fi
           done
           export PATH="$HOME/.config/tokenagenthub/node22/bin:$HOME/.config/tokenagenthub/npm/bin:$PATH"
           codex --version
           claude --version
           for app in codex claude-code; do
-            bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --no-verify
+            if [ "$app" = codex ]; then
+              bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --target cli --no-verify
+            else
+              bash "$RUNNER_TEMP/tah-scripts/$app.sh" --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --no-verify
+            fi
           done
           node <<'JS'
           const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
@@ -67,6 +80,41 @@ jobs:
           assert(rc.includes('KEEP_SHELL_SETTING=yes'));
           assert.equal((rc.match(/# BEGIN TOKENAGENTHUB TERMINAL SETUP V1/g)||[]).length,1);
           assert.equal(fs.readdirSync(path.join(home,'.config/tokenagenthub/backups')).length,4);
+          assert(fs.existsSync(path.join(home,'.config/tokenagenthub/node22/bin/node')));
           console.log('PASS: actual CLI installation/startup, configuration merge, backups and repeat setup');
           JS
           bash --noprofile --rcfile "$HOME/.bashrc" -ic 'test "$TOKENAGENTHUB_API_KEY" = cr_ISOLATED_TEST_NOT_A_REAL_KEY && test "$ANTHROPIC_BASE_URL" = https://aiapi.tokenagenthub.com/api && codex --version && claude --version'
+      - name: Piped one-line entry, App target and hidden-key prompt
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/tah-home"
+          export CODEX_HOME="$HOME/.codex"
+          export CLAUDE_CONFIG_DIR="$HOME/.claude"
+          export PATH="$HOME/.config/tokenagenthub/node22/bin:$HOME/.config/tokenagenthub/npm/bin:$PATH"
+          curl -fsSL https://aiapi.tokenagenthub.com/install/codex.sh | bash -s -- --key cr_ISOLATED_TEST_NOT_A_REAL_KEY --yes --target app --no-verify
+          curl -fsSL https://aiapi.tokenagenthub.com/install/claude-code.sh | bash -s -- --help
+          python3 <<'PY'
+          import os, pty, select, time
+          command='curl -fsSL https://aiapi.tokenagenthub.com/install/claude-code.sh | bash -s -- --no-install --no-verify'
+          pid, fd=pty.fork()
+          if pid == 0:
+              os.execvp('bash',['bash','-c',command])
+          output=b''; sent=False; deadline=time.time()+90
+          while time.time()<deadline:
+              ready,_,_=select.select([fd],[],[],1)
+              if ready:
+                  try: chunk=os.read(fd,65536)
+                  except OSError: break
+                  if not chunk: break
+                  output+=chunk
+                  if b'API key (hidden):' in output and not sent:
+                      os.write(fd,b'cr_ISOLATED_TEST_NOT_A_REAL_KEY\n');sent=True
+              done,status=os.waitpid(pid,os.WNOHANG)
+              if done: break
+          else:
+              os.kill(pid,15);raise RuntimeError('Interactive setup timed out')
+          assert sent,output.decode(errors='replace')
+          assert b'[OK] Setup complete' in output,output.decode(errors='replace')
+          print('PASS: curl | bash reads the hidden key from a real pseudo-terminal')
+          PY
